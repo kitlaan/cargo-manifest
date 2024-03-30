@@ -12,6 +12,7 @@ this = sys.modules[__name__]  # For holding module globals
 this.cargoDict = {}
 this.eddbData = {}
 this.inventory = []
+this.missions = {}
 this.cargoCapacity = "?"
 this.version = 'v3.0.0'
 
@@ -98,7 +99,7 @@ def pullItems():
 	return items
 
 def journal_entry(cmdr, is_beta, system, station, entry, state):
-	# Parse journal entries	
+	# Parse journal entries
 	if entry['event'] == 'Cargo':
 		# Emitted whenever cargo hold updates
 		if state['Cargo'] != this.cargoDict:
@@ -106,12 +107,22 @@ def journal_entry(cmdr, is_beta, system, station, entry, state):
 		if 'Inventory' in entry and entry['Inventory'] != this.inventory:
 			this.inventory = entry['Inventory']
 		update_display()
-	
+
 	elif entry['event'] == 'Loadout' and this.cargoCapacity != entry['CargoCapacity']:
 		# Emitted when loadout changes, plugin only cares if the cargo capacity changes
 		this.cargoCapacity = entry['CargoCapacity']
 		update_display()
-	
+
+	elif entry['event'] == 'MissionAccepted':
+		if 'Count' in entry:
+			this.missions[entry['MissionID']] = {'name':entry['Commodity_Localised'], 'count':entry['Count']}
+			update_display()
+
+	elif entry['event'] == 'MissionAbandoned' or entry['event'] == 'MissionCompleted' or entry['event'] == 'MissionFailed':
+		if entry['MissionID'] in this.missions:
+			del this.missions[entry['MissionID']]
+			update_display()
+
 	elif entry['event'] == 'StartUp':
 		# Tries to update display from EDMC stored data when started after the game
 		this.cargoDict = state['Cargo']
@@ -143,37 +154,52 @@ def journal_entry(cmdr, is_beta, system, station, entry, state):
 
 def update_display():
 	# When cargo or loadout change update main UI
-	manifest = ""
+	manifest = {}
 	currentCargo = 0
-	cumulativeMaxSell = 0
-	for i in this.inventory:
-		line = ""
-		if i['Name'] in this.items:
-			line = "{quant} {name}".format(quant = i['Count'], name=this.items[i['Name']]['name'])
-		else:
-			line = "{quant} {name}".format(quant = i['Count'], name=(i['Name_Localised'] if 'Name_Localised' in i else i['Name']))
-		if 'Stolen' in i and i['Stolen'] > 0:
-			line = line+", {} stolen".format(i['Stolen'])
-		if 'MissionID' in i:
-			line = line+" (Mission)"
 
-		manifest = manifest+"\n"+line
+	for i in this.inventory:
+		if i['Name'] in this.items:
+			name = this.items[i['Name']]['name']
+		else:
+			name = i['Name_Localised'] if 'Name_Localised' in i else i['Name']
+
+		stolen = i['Stolen'] if 'Stolen' in i else 0
+		mission = 'MissionID' in i
+
+		manifest[str(i['MissionID']) if mission else name] = {'name':name, 'quantity':i['Count'], 'stolen':stolen, 'mission':mission, 'want':0}
 		currentCargo += int(i['Count'])
 
 	if this.inventory == []:
 		for i in this.cargoDict:
-			manifest = manifest+"\n{quant} {name}".format(name=(this.items[i]['name'] if i in this.items else i), quant=this.cargoDict[i])
+			manifest[this.items[i]['name'] if i in this.items else i] = {'quantity':this.cargoDict[i], 'stolen':0, 'mission':False, 'want':0}
 			currentCargo += int(this.cargoDict[i])
 
-	if config.get_bool("cm_showMaxSell") and cumulativeMaxSell > 0:
-		manifest = manifest+"\n\nTotal max sell: {:,} cr".format(cumulativeMaxSell)
-	
+	for key, value in this.missions.items():
+		if key in manifest:
+			manifest[key]['want'] += value['count']
+		elif value['name'] in manifest:
+			manifest[value['name']]['want'] += value['count']
+		else:
+			manifest[value['name']] = {'name':value['name'], 'quantity':0, 'stolen':0, 'mission':False, 'want':value['count']}
+
+	lines = []
+	for _, value in sorted(manifest.items(), key=lambda item: item[1]['name']):
+		line = "{quant} {name}".format(name=value['name'], quant=value['quantity'])
+		if value['stolen'] > 0:
+			line += ", {} stolen".format(value['stolen'])
+		if value['mission']:
+			line += " [Mission]"
+		elif value['want'] > 0:
+			line += " [{} wanted]".format(value['want'])
+		lines.append(line)
+
 	this.title["text"] = "Cargo Manifest ({curr}/{cap})".format(curr = currentCargo, cap = this.cargoCapacity)
-	this.manifest["text"] = manifest.strip() # Remove leading newline
+	this.manifest["text"] = '\n'.join(lines)
 	this.title.grid()
 	if this.newest == 0:
 		this.manifest.grid(columnspan=2)
 	else:
 		this.manifest.grid()
-	if manifest.strip() == "":
+	if len(lines) == 0:
 		this.manifest.grid_remove()
+
